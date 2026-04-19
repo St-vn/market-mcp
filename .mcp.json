@@ -1,10 +1,10 @@
 {
   "mcpServers": {
     "roblox-market": {
-      "command": "C:/Users/megas/AppData/Local/Microsoft/WindowsApps/PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0/python.exe",
-      "args": ["C:/Users/megas/Documents/GitHub/market-mcp/server.py"],
+      "command": "python",
+      "args": ["/absolute/path/to/market-mcp/server.py"],
       "env": {
-        "GOOGLE_AI_KEY": ""
+        "GOOGLE_AI_KEY": "your-google-ai-key-here"
       }
     }
   }
