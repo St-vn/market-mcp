@@ -1,3 +1,5 @@
+import os
+import base64
 from fastmcp import FastMCP
 from data.fetcher import get_market_snapshot
 from data.signals import compute_genre_stats, compute_gap_analysis, compute_top_performers
@@ -87,6 +89,82 @@ async def analyze_game_design(game_name: str, wiki_url: str = "") -> dict:
                   Auto-discovered from game_name if omitted. Provide when auto-discovery fails.
     """
     return await analyze_game_wiki(game_name, wiki_url or None)
+
+
+@mcp.tool
+async def analyze_thumbnail(universe_id: str) -> dict:
+    """
+    Fetches a Roblox game's thumbnail and uses Google Gemini Vision to score
+    its click appeal and genre clarity — both strong proxies for QPTR (qualified
+    play-through rate), since poor thumbnails suppress click-through before
+    the algorithm can even measure session quality.
+
+    Requires GOOGLE_AI_KEY environment variable.
+
+    Args:
+        universe_id: The Roblox universe ID of the game (not place ID).
+                     Find it at: roblox.com/games/<universeId>
+    """
+    api_key = os.environ.get("GOOGLE_AI_KEY")
+    if not api_key:
+        return {
+            "error": "GOOGLE_AI_KEY environment variable not set.",
+            "hint": "Set it with: export GOOGLE_AI_KEY=your_key_here",
+        }
+
+    from data.fetcher import fetch_thumbnail
+    image_bytes = await fetch_thumbnail(universe_id)
+    if not image_bytes:
+        return {
+            "error": f"Could not fetch thumbnail for universe_id={universe_id}.",
+            "hint": "Verify the universe_id is correct (not place_id).",
+        }
+
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+
+        image_part = {
+            "inline_data": {
+                "mime_type": "image/png",
+                "data": base64.b64encode(image_bytes).decode("utf-8"),
+            }
+        }
+        prompt = (
+            "You are analyzing a Roblox game thumbnail for market intelligence.\n\n"
+            "Score and explain the following (be specific and concise):\n"
+            "1. QPTR likelihood (1-10): How likely is a player to click AND stay after seeing this thumbnail?\n"
+            "2. Genre clarity (1-10): How clearly does the thumbnail signal what genre/gameplay this is?\n"
+            "3. Visual appeal (1-10): Color contrast, composition, character readability at small size.\n"
+            "4. Key strengths: What works (max 2 bullet points).\n"
+            "5. Key weaknesses: What hurts click-through (max 2 bullet points).\n"
+            "6. Algorithm lens: How does this thumbnail likely affect the game's QPTR signal in Roblox's discovery algorithm?\n\n"
+            "Return a JSON object with keys: qptr_score, genre_clarity_score, visual_appeal_score, "
+            "strengths (list), weaknesses (list), algorithm_lens (string)."
+        )
+
+        response = model.generate_content([prompt, image_part])
+        raw = response.text.strip()
+
+        # Strip markdown code fences if present
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+
+        import json
+        analysis = json.loads(raw)
+        analysis["universe_id"] = universe_id
+        analysis["thumbnail_analyzed"] = True
+        return analysis
+
+    except Exception as e:
+        return {
+            "error": f"Gemini analysis failed: {str(e)}",
+            "universe_id": universe_id,
+        }
 
 
 if __name__ == "__main__":

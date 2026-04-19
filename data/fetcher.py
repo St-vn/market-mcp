@@ -38,6 +38,27 @@ async def fetch_rolimons(client: httpx.AsyncClient) -> list[dict]:
     games.sort(key=lambda g: g["active_players"], reverse=True)
     return games[:TOP_N]
 
+
+ROBLOX_THUMBNAILS = "https://thumbnails.roblox.com/v1/games/icons"
+
+async def fetch_thumbnail(universe_id: str) -> bytes | None:
+    """Fetches the 512x512 PNG thumbnail for a universe. Returns raw bytes or None."""
+    async with httpx.AsyncClient(timeout=15, headers=HEADERS) as client:
+        try:
+            params = {"universeIds": universe_id, "size": "512x512", "format": "Png"}
+            r = await client.get(ROBLOX_THUMBNAILS, params=params)
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            image_url = data["data"][0].get("imageUrl")
+            if not image_url:
+                return None
+            img_r = await client.get(image_url)
+            return img_r.content if img_r.status_code == 200 else None
+        except Exception:
+            return None
+
+
 async def enrich_universe_ids(client: httpx.AsyncClient, games: list[dict]) -> list[dict]:
     sem = asyncio.Semaphore(CONCURRENT)
 
