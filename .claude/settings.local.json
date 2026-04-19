@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__roblox-market__analyze_game_design",
+      "Bash(python test_fetch.py)",
+      "Bash(cat docs/ARCHITECTURE.md)",
+      "Bash(cat data/../docs/ARCHITECTURE.md)",
+      "Bash(pip install *)",
+      "Bash(python -c \"import fastmcp, httpx, bs4, google.generativeai; print\\('all imports OK'\\)\")",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(rtk git *)",
+      "Bash(python -c \"import fastmcp, httpx, bs4, google.generativeai; print\\('All imports successful'\\)\")",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

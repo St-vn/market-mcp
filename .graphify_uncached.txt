@@ -1,0 +1,8 @@
+CLAUDE.md
+README.md
+requirements.txt
+docs\ARCHITECTURE.md
+docs\market-intelligence-mcp-generalized.md
+docs\SPEC.md
+docs\superpowers\plans\2026-04-18-roblox-market-intelligence-mcp.md
+docs\superpowers\plans\2026-04-19-mcp-rebuild.md

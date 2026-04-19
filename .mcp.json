@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "roblox-market": {
-      "command": "C:/Users/Fourt/AppData/Local/Programs/Python/Python312/python",
-      "args": ["C:/Users/Fourt/Documents/GitHub/market-mcp/server.py"]
+      "command": "C:/Users/megas/AppData/Local/Microsoft/WindowsApps/PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0/python.exe",
+      "args": ["C:/Users/megas/Documents/GitHub/market-mcp/server.py"]
     }
   }
 }

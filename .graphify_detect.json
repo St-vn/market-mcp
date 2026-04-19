@@ -1,0 +1,31 @@
+{
+  "files": {
+    "code": [
+      "server.py",
+      "test_fetch.py",
+      "data\\fetcher.py",
+      "data\\signals.py",
+      "data\\wiki.py",
+      "data\\__init__.py"
+    ],
+    "document": [
+      "CLAUDE.md",
+      "README.md",
+      "requirements.txt",
+      "docs\\ARCHITECTURE.md",
+      "docs\\market-intelligence-mcp-generalized.md",
+      "docs\\SPEC.md",
+      "docs\\superpowers\\plans\\2026-04-18-roblox-market-intelligence-mcp.md",
+      "docs\\superpowers\\plans\\2026-04-19-mcp-rebuild.md"
+    ],
+    "paper": [],
+    "image": [],
+    "video": []
+  },
+  "total_files": 14,
+  "total_words": 16740,
+  "needs_graph": false,
+  "warning": "Corpus is ~16,740 words - fits in a single context window. You may not need a graph.",
+  "skipped_sensitive": [],
+  "graphifyignore_patterns": 0
+}
