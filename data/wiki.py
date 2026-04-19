@@ -16,18 +16,19 @@ from html.parser import HTMLParser
 # Fandom is the dominant wiki platform for Roblox games
 FANDOM_BASE = "https://{slug}.fandom.com"
 
-# Sub-pages to probe per wiki — ordered from most to least likely to have economy data
-WIKI_SUB_PAGES = [
-    "/wiki/",
-    "/wiki/Main_Page",
-    "/wiki/Gamepasses",
-    "/wiki/Game_Pass",
-    "/wiki/Shop",
-    "/wiki/Items",
-    "/wiki/Currency",
-    "/wiki/Currencies",
-    "/wiki/Store",
-    "/wiki/Products",
+# Pages to fetch via MediaWiki API — ordered from most to least likely to have economy data.
+# Fandom's /api.php endpoint bypasses Cloudflare restrictions on direct page fetches.
+WIKI_PAGES_TO_FETCH = [
+    "Main_Page",
+    "Gamepasses",
+    "Game_Pass",
+    "Shop",
+    "Items",
+    "Currency",
+    "Currencies",
+    "Store",
+    "Products",
+    "Weapons",
 ]
 
 # Regex keywords that identify economy-relevant table content
@@ -163,20 +164,50 @@ def _slug_candidates(game_name: str) -> list[str]:
 async def _discover_fandom_wiki(client: httpx.AsyncClient, game_name: str) -> str | None:
     """Probe Fandom subdomain patterns to find a game's wiki base URL.
 
+    Uses the MediaWiki API endpoint (/api.php) rather than direct page requests,
+    since Fandom's Cloudflare protection blocks plain httpx GETs on page URLs
+    but allows API queries.
+
     Returns the base URL (e.g. "https://bloxfruits.fandom.com") on success,
     or None if no wiki is found. Failed probes are silently dropped.
     """
     for slug in _slug_candidates(game_name):
-        url = FANDOM_BASE.format(slug=slug) + "/wiki/"
+        api_url = FANDOM_BASE.format(slug=slug) + "/api.php"
         try:
-            resp = await client.get(url, timeout=8)
-            # Fandom redirects non-existent wikis to www.fandom.com/search —
-            # verify the slug is still present in the final URL
-            if resp.status_code == 200 and slug in str(resp.url):
+            resp = await client.get(
+                api_url,
+                params={"action": "query", "meta": "siteinfo", "format": "json"},
+                timeout=8,
+            )
+            if resp.status_code == 200 and resp.json().get("query", {}).get("general"):
                 return FANDOM_BASE.format(slug=slug)
         except Exception:
             continue
     return None
+
+
+async def _fetch_page_html(client: httpx.AsyncClient, base: str, page: str) -> str:
+    """Fetch a wiki page's rendered HTML via the MediaWiki parse API.
+
+    Returns empty string on failure — callers skip empty results silently.
+    """
+    try:
+        resp = await client.get(
+            base + "/api.php",
+            params={
+                "action": "parse",
+                "page": page,
+                "prop": "text",
+                "format": "json",
+                "disablelimitreport": "1",
+            },
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("parse", {}).get("text", {}).get("*", "")
+    except Exception:
+        pass
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -198,10 +229,19 @@ def _detect_currencies(records: list[dict]) -> list[str]:
     combined = " ".join(
         f"{k} {v}" for r in records for k, v in r.items()
     ).lower()
+    return _match_currency_patterns(combined)
+
+
+def _detect_currencies_from_text(text: str) -> list[str]:
+    """Scan plain page text for currency keywords (catches prose like 'costs 150 Robux')."""
+    return _match_currency_patterns(text.lower())
+
+
+def _match_currency_patterns(text: str) -> list[str]:
     found = []
     seen: set[str] = set()
     for pattern, label in CURRENCY_PATTERNS:
-        if label not in seen and re.search(pattern, combined):
+        if label not in seen and re.search(pattern, text):
             found.append(label)
             seen.add(label)
     return found
@@ -290,33 +330,47 @@ async def analyze_game_wiki(game_name: str, wiki_url: str | None = None) -> dict
                 ),
             }
 
-        # Fetch main page + common sub-pages; collect economy tables
+        # Discover additional relevant pages via search API
+        extra_pages: list[str] = []
+        try:
+            resp = await client.get(
+                base + "/api.php",
+                params={
+                    "action": "query", "list": "search",
+                    "srsearch": "cost price robux shop gamepass currency bucks gems",
+                    "srlimit": "8", "format": "json",
+                },
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                extra_pages = [
+                    p["title"] for p in resp.json().get("query", {}).get("search", [])
+                    if p["title"] not in WIKI_PAGES_TO_FETCH
+                ]
+        except Exception:
+            pass
+
+        # Fetch all pages: hard-coded list + search results
         all_economy_records: list[dict] = []
         description = ""
         pages_fetched = 0
-        seen_urls: set[str] = set()
+        full_text_for_currencies = ""
 
-        for sub in WIKI_SUB_PAGES:
-            url = base + sub
-            if url in seen_urls:
+        for page in WIKI_PAGES_TO_FETCH + extra_pages:
+            html = await _fetch_page_html(client, base, page)
+            if not html:
                 continue
-            seen_urls.add(url)
-            try:
-                resp = await client.get(url, timeout=8)
-                if resp.status_code != 200:
-                    continue
-                html = resp.text
-                pages_fetched += 1
+            pages_fetched += 1
+            plain = re.sub(r"<[^>]+>", " ", html)
 
-                if not description:
-                    description = _extract_lead_text(html)
+            if not description:
+                description = _extract_lead_text(html)
+            full_text_for_currencies += " " + plain[:2000]
 
-                for table in _parse_tables(html):
-                    records = _table_to_records(table)
-                    if _is_economy_table(records):
-                        all_economy_records.extend(records[:25])  # cap per table
-            except Exception:
-                continue
+            for table in _parse_tables(html):
+                records = _table_to_records(table)
+                if _is_economy_table(records):
+                    all_economy_records.extend(records[:25])
 
         if pages_fetched == 0:
             return {
@@ -334,7 +388,13 @@ async def analyze_game_wiki(game_name: str, wiki_url: str | None = None) -> dict
                 seen_keys.add(key)
                 unique_records.append(r)
 
+        # Detect currencies from tables AND from page text (catches text like "costs 150 Robux")
         currencies = _detect_currencies(unique_records)
+        if full_text_for_currencies:
+            text_currencies = _detect_currencies_from_text(full_text_for_currencies)
+            for c in text_currencies:
+                if c not in currencies:
+                    currencies.append(c)
         algorithm_lens = _build_algorithm_lens(currencies, len(unique_records))
 
         return {
