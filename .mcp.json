@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "roblox-market": {
+      "command": "C:/Users/Fourt/AppData/Local/Programs/Python/Python312/python",
+      "args": ["C:/Users/Fourt/Documents/GitHub/market-mcp/server.py"]
+    }
+  }
+}
