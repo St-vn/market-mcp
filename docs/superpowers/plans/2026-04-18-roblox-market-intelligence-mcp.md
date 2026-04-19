@@ -688,6 +688,150 @@ The client config file is outside the repo. If any tool returned a traceback or 
 
 ---
 
+### Task 6: Implement data/wiki.py + analyze_game_design tool
+
+**Why sixth:** Adds a second intelligence layer. Market data tells the agent *which genres to target*; wiki data tells it *how top games in those genres are designed* — economy structure, progression depth, monetization patterns — interpreted through the RFY algorithm lens.
+
+**Files:**
+- Create: `data/wiki.py`
+- Update: `server.py` (add import + fifth tool)
+
+- [ ] **Step 1: Create data/wiki.py**
+
+Full implementation is in `docs/ARCHITECTURE.md` under `## data/wiki.py`. Key responsibilities:
+- `_slug_candidates(game_name)` — generate Fandom subdomain patterns (hyphenated + no-separator)
+- `_discover_fandom_wiki(client, game_name)` — probe slug candidates, return base URL or None
+- `_TableParser` (HTMLParser subclass) — extract outermost tables, skip nested tables
+- `_parse_tables(html)` — feed parser, return tables as nested lists
+- `_table_to_records(table)` — first row = headers, rest = data dicts
+- `_is_economy_table(records)` — keyword filter for cost/price/robux/coin/gem/etc.
+- `_detect_currencies(records)` — match known Roblox currency patterns in table content
+- `_build_algorithm_lens(currencies, item_count)` — interpret economy through RFY signal lens
+- `analyze_game_wiki(game_name, wiki_url)` — main async entry point
+
+- [ ] **Step 2: Update server.py to add the fifth tool**
+
+Add import at top:
+```python
+from data.wiki import analyze_game_wiki
+```
+
+Add tool after `get_top_performers`:
+```python
+@mcp.tool
+async def analyze_game_design(game_name: str, wiki_url: str = "") -> dict:
+    """
+    Scrapes a competitor game's public wiki to extract game design intelligence:
+    economy structure (currencies, item costs), progression depth, and monetization
+    patterns. Interprets findings through the RFY discovery algorithm lens —
+    which design choices proxy well for QPTR, favorites rate, and 7-day play days.
+
+    Use this BEFORE designing mechanics for a target genre. How top-performing
+    games structure their economy reveals what keeps players returning daily —
+    the core signal the algorithm rewards over raw player count.
+
+    Roblox game wikis (typically at <gamename>.fandom.com) contain item tables,
+    shop listings, and gamepass descriptions that expose the full progression
+    design without needing Creator Dashboard access.
+
+    Args:
+        game_name: Roblox game name, e.g. "Blox Fruits", "Adopt Me", "Pet Simulator X"
+        wiki_url: Optional base URL of the game's wiki, e.g. "https://bloxfruits.fandom.com".
+                  Auto-discovered from game_name if omitted. Provide when auto-discovery fails.
+    """
+    return await analyze_game_wiki(game_name, wiki_url or None)
+```
+
+- [ ] **Step 3: Smoke-verify wiki discovery and table extraction**
+
+```bash
+python -c "
+import asyncio
+from data.wiki import analyze_game_wiki
+
+# Test with a well-documented game (Blox Fruits has a large Fandom wiki)
+result = asyncio.run(analyze_game_wiki('Blox Fruits'))
+print('game:', result.get('game'))
+print('wiki_source:', result.get('wiki_source'))
+print('pages_fetched:', result.get('pages_fetched'))
+print('currencies:', result.get('currencies_detected'))
+print('items_found:', result.get('economy_items_found'))
+print('algorithm_lens:', result.get('algorithm_lens', '')[:120])
+print('sample_items count:', len(result.get('sample_items', [])))
+"
+```
+
+Expected:
+- `wiki_source` is `https://bloxfruits.fandom.com`
+- `pages_fetched` ≥ 1
+- `currencies_detected` includes Robux and/or Beli
+- `economy_items_found` ≥ 1 (wiki table quality varies)
+- `algorithm_lens` is a non-empty string with algorithm signal framing
+- No Python traceback
+
+If `wiki_source` is None or returns `error`: the slug auto-discovery probed the wrong URL. Test manually:
+```bash
+python -c "
+import asyncio, httpx
+async def test():
+    async with httpx.AsyncClient(follow_redirects=True) as c:
+        r = await c.get('https://bloxfruits.fandom.com/wiki/', timeout=8)
+        print(r.status_code, str(r.url)[:80])
+asyncio.run(test())
+"
+```
+If status != 200 or URL doesn't contain "bloxfruits", the wiki may have moved. Try providing `wiki_url` directly to bypass auto-discovery.
+
+- [ ] **Step 4: Smoke-verify unknown game returns clean error**
+
+```bash
+python -c "
+import asyncio
+from data.wiki import analyze_game_wiki
+result = asyncio.run(analyze_game_wiki('Zorkian Destroyer 9000'))
+print(result)
+"
+```
+
+Expected: `{'error': \"No Fandom wiki found for 'Zorkian Destroyer 9000'.\", 'hint': '...'}` — no traceback.
+
+- [ ] **Step 5: Smoke-verify tool wires correctly in server.py**
+
+```bash
+python -c "
+from server import mcp
+tools = [t.name for t in mcp._tool_manager.list_tools()]
+print('tools:', tools)
+assert 'analyze_game_design' in tools, 'tool not registered'
+print('OK')
+"
+```
+
+Expected: `tools` list contains all five tool names including `analyze_game_design`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add data/wiki.py server.py docs/ARCHITECTURE.md docs/SPEC.md docs/superpowers/plans/2026-04-18-roblox-market-intelligence-mcp.md
+git commit -m "feat: wiki intelligence layer — analyze_game_design tool
+
+Adds data/wiki.py: auto-discovers a game's Fandom wiki by probing
+slug patterns, fetches up to 10 sub-pages (shop, items, gamepasses,
+currency), extracts economy tables via stdlib html.parser (outermost
+tables only — nested tables skipped to avoid nav pollution), detects
+currency systems, and interprets economy structure through the RFY
+algorithm lens.
+
+New tool analyze_game_design() surfaces this as on-demand competitor
+research. No cache needed (per-game, <5s). No new dependencies —
+html.parser is stdlib.
+
+Updates ARCHITECTURE.md, SPEC.md, and this plan file to document
+the feature end-to-end."
+```
+
+---
+
 ## Self-Review Checklist
 
 Run against the spec with fresh eyes:

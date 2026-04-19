@@ -11,19 +11,27 @@
 ┌────────────────────▼────────────────────────────────┐
 │              FastMCP Server (server.py)              │
 │                                                     │
-│  Tools:                                             │
+│  Market data tools (cached):                        │
 │  • get_trending_genres()                            │
 │  • get_genre_analysis(genre)                        │
 │  • get_gap_analysis()                               │
 │  • get_top_performers(metric)                       │
 │                                                     │
+│  Design intelligence tool (on-demand):              │
+│  • analyze_game_design(game_name, wiki_url)         │
+│                                                     │
 │  Cache layer (in-memory, 10min TTL)                 │
-└────────────────────┬────────────────────────────────┘
-                     │ httpx async
-     ┌───────────────┼───────────────┐
-     ▼               ▼               ▼
-Rolimons API    RoTunnel Proxy   RoTunnel Proxy
-(gamelist)      (universes API)  (games detail API)
+└──────────────┬─────────────────────┬───────────────┘
+               │ httpx async         │ httpx async
+     ┌─────────┴──────┐    ┌─────────┴──────────────┐
+     │  Market data   │    │    Wiki scraper         │
+     │  pipeline      │    │    (data/wiki.py)       │
+     └───────┬────────┘    └─────────────────────────┘
+             │                        ▲
+     ┌───────┼───────┐                │ per-call, no cache
+     ▼       ▼       ▼                ▼
+Rolimons  RoTunnel RoTunnel   Fandom wikis
+(gamelist)(univ.)  (details)  (<game>.fandom.com)
 ```
 
 ## File Structure
@@ -32,8 +40,9 @@ Rolimons API    RoTunnel Proxy   RoTunnel Proxy
 roblox-market-mcp/
 ├── server.py          # FastMCP server, tool definitions
 ├── data/
-│   ├── fetcher.py     # All HTTP calls, async, batched
-│   └── signals.py     # Signal computation and genre aggregation
+│   ├── fetcher.py     # All HTTP calls, async, batched (market data pipeline)
+│   ├── signals.py     # Signal computation and genre aggregation
+│   └── wiki.py        # Fandom wiki scraper: table extraction, economy analysis
 ├── README.md
 ├── SPEC.md
 ├── ARCHITECTURE.md
@@ -49,6 +58,7 @@ Entry point and tool definitions. FastMCP handles all MCP protocol complexity.
 from fastmcp import FastMCP
 from data.fetcher import get_market_snapshot
 from data.signals import compute_genre_stats, compute_gap_analysis, compute_top_performers
+from data.wiki import analyze_game_wiki
 
 mcp = FastMCP("Roblox Market Intelligence")
 
@@ -105,6 +115,30 @@ async def get_top_performers(metric: str) -> dict:
     """
     snapshot = await get_cached_snapshot()
     return compute_top_performers(snapshot, metric)
+
+@mcp.tool
+async def analyze_game_design(game_name: str, wiki_url: str = "") -> dict:
+    """
+    Scrapes a competitor game's public wiki to extract game design intelligence:
+    economy structure (currencies, item costs), progression depth, and monetization
+    patterns. Interprets findings through the RFY discovery algorithm lens —
+    which design choices proxy well for QPTR, favorites rate, and 7-day play days.
+
+    Use this BEFORE designing mechanics for a target genre. How top-performing
+    games structure their economy reveals what keeps players returning daily —
+    the core signal the algorithm rewards over raw player count.
+
+    Roblox game wikis (typically at <gamename>.fandom.com) contain item tables,
+    shop listings, and gamepass descriptions that expose the full progression
+    design without needing Creator Dashboard access.
+
+    Args:
+        game_name: Roblox game name, e.g. "Blox Fruits", "Adopt Me", "Pet Simulator X"
+        wiki_url: Optional base URL of the game's wiki, e.g. "https://bloxfruits.fandom.com".
+                  Auto-discovered from game_name if omitted. Provide when auto-discovery fails.
+    """
+    return await analyze_game_wiki(game_name, wiki_url or None)
+
 
 if __name__ == "__main__":
     mcp.run()  # STDIO transport, works directly with Claude Code
@@ -394,11 +428,279 @@ def compute_top_performers(games: list[dict], metric: str) -> dict:
     }
 ```
 
+## data/wiki.py
+
+Wiki intelligence scraper. Pure httpx + stdlib `html.parser` — no new dependencies.
+
+```python
+"""
+data/wiki.py — Roblox game wiki intelligence scraper
+
+Fetches a game's public Fandom wiki and extracts design intelligence:
+economy structure (currencies, item costs), progression depth, and
+monetization patterns. Interprets findings through the RFY algorithm lens.
+
+Data source: public Fandom wikis (e.g. bloxfruits.fandom.com).
+No additional dependencies — uses stdlib html.parser for table extraction.
+"""
+
+import re
+import httpx
+from html.parser import HTMLParser
+
+FANDOM_BASE = "https://{slug}.fandom.com"
+
+WIKI_SUB_PAGES = [
+    "/wiki/", "/wiki/Main_Page", "/wiki/Gamepasses", "/wiki/Game_Pass",
+    "/wiki/Shop", "/wiki/Items", "/wiki/Currency", "/wiki/Currencies",
+    "/wiki/Store", "/wiki/Products",
+]
+
+ECONOMY_KEYWORDS = [
+    r"cost", r"price", r"robux", r"\br\$", r"beli", r"\bcoin", r"\bgem",
+    r"\bgold\b", r"\bcash\b", r"\btoken", r"\bbuck", r"credit",
+]
+
+CURRENCY_PATTERNS = [
+    (r"robux|r\$",    "Robux (premium Roblox currency)"),
+    (r"\bbeli\b",     "Beli (in-game currency)"),
+    (r"\bcoin",       "Coins (in-game currency)"),
+    (r"\bgem",        "Gems (premium in-game currency)"),
+    (r"\bgold\b",     "Gold (in-game currency)"),
+    (r"\bcash\b",     "Cash (in-game currency)"),
+    (r"\btoken",      "Tokens (special currency)"),
+    (r"\bbuck",       "Bucks (in-game currency)"),
+    (r"\bcredit",     "Credits (in-game currency)"),
+]
+
+
+class _TableParser(HTMLParser):
+    """Extracts outermost tables as row lists. Nested tables are skipped."""
+
+    def __init__(self):
+        super().__init__()
+        self.tables: list[list[list[str]]] = []
+        self._table: list[list[str]] = []
+        self._row: list[str] = []
+        self._cell: list[str] = []
+        self._table_depth = 0
+        self._in_cell = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self._table_depth += 1
+            if self._table_depth == 1:
+                self._table = []
+        elif tag == "tr" and self._table_depth == 1:
+            self._row = []
+        elif tag in ("td", "th") and self._table_depth == 1:
+            self._in_cell = True
+            self._cell = []
+
+    def handle_endtag(self, tag):
+        if tag == "table":
+            if self._table_depth == 1 and self._table:
+                self.tables.append([r for r in self._table if r])
+            self._table_depth = max(0, self._table_depth - 1)
+        elif tag == "tr" and self._table_depth == 1:
+            if self._row:
+                self._table.append(self._row[:])
+        elif tag in ("td", "th") and self._table_depth == 1 and self._in_cell:
+            self._row.append(" ".join(self._cell).strip())
+            self._in_cell = False
+
+    def handle_data(self, data):
+        if self._in_cell and self._table_depth == 1:
+            stripped = data.strip()
+            if stripped:
+                self._cell.append(stripped)
+
+
+def _parse_tables(html: str) -> list[list[list[str]]]:
+    parser = _TableParser()
+    try:
+        parser.feed(html)
+    except Exception:
+        pass
+    return parser.tables
+
+
+def _table_to_records(table: list[list[str]]) -> list[dict]:
+    if len(table) < 2:
+        return []
+    headers = [h.lower().strip()[:50] for h in table[0]]
+    if not any(headers):
+        return []
+    records = []
+    for row in table[1:]:
+        if not any(v.strip() for v in row):
+            continue
+        padded = (row + [""] * len(headers))[:len(headers)]
+        records.append(dict(zip(headers, padded)))
+    return records
+
+
+def _is_economy_table(records: list[dict]) -> bool:
+    if not records:
+        return False
+    sample = " ".join(f"{k} {v}" for r in records[:3] for k, v in r.items()).lower()
+    return any(re.search(kw, sample) for kw in ECONOMY_KEYWORDS)
+
+
+def _extract_lead_text(html: str) -> str:
+    for match in re.finditer(r"<p[^>]*>(.*?)</p>", html, re.DOTALL | re.IGNORECASE):
+        text = re.sub(r"<[^>]+>", "", match.group(1))
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > 60:
+            return text[:600]
+    return ""
+
+
+def _detect_currencies(records: list[dict]) -> list[str]:
+    combined = " ".join(f"{k} {v}" for r in records for k, v in r.items()).lower()
+    found = []
+    seen: set[str] = set()
+    for pattern, label in CURRENCY_PATTERNS:
+        if label not in seen and re.search(pattern, combined):
+            found.append(label)
+            seen.add(label)
+    return found
+
+
+def _slug_candidates(game_name: str) -> list[str]:
+    name = game_name.strip()
+    candidates = [
+        re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-"),
+        re.sub(r"[^a-z0-9]", "", name.lower()),
+    ]
+    seen: set[str] = set()
+    return [s for s in candidates if s and not (s in seen or seen.add(s))]
+
+
+async def _discover_fandom_wiki(client: httpx.AsyncClient, game_name: str) -> str | None:
+    for slug in _slug_candidates(game_name):
+        url = FANDOM_BASE.format(slug=slug) + "/wiki/"
+        try:
+            resp = await client.get(url, timeout=8)
+            if resp.status_code == 200 and slug in str(resp.url):
+                return FANDOM_BASE.format(slug=slug)
+        except Exception:
+            continue
+    return None
+
+
+def _build_algorithm_lens(currencies: list[str], item_count: int) -> str:
+    has_robux = any("Robux" in c for c in currencies)
+    has_ingame = any("Robux" not in c for c in currencies)
+    parts = []
+
+    if has_robux and has_ingame:
+        parts.append(
+            "Dual-currency economy (Robux + in-game grind currency): standard Roblox retention engine. "
+            "In-game currency requires daily play sessions (boosts 7-day play-days proxy). "
+            "Robux provides skip/exclusive access (drives spend-days signal). "
+            "This combination correlates strongly with high engagement ratio and favorites rate."
+        )
+    elif has_robux:
+        parts.append(
+            "Robux-only economy: direct monetization but no free progression loop. "
+            "Risk: non-spending players have no retention hook, weakening the 7-day play-days proxy."
+        )
+    elif has_ingame:
+        parts.append(
+            "Free progression economy (no Robux items found): strong accessibility signal. "
+            "Drives high QPTR but spend-days signal near zero."
+        )
+
+    if item_count > 30:
+        parts.append(
+            f"Rich item catalog ({item_count}+ items): depth of collectibles correlates with "
+            "repeat-session motivation and favorites rate (bookmark-to-return behavior)."
+        )
+    elif item_count > 5:
+        parts.append(f"Moderate item catalog ({item_count} items): sufficient for basic progression loops.")
+
+    if not parts:
+        parts.append("Insufficient economy data extracted. Provide wiki_url directly or check manually.")
+
+    return " ".join(parts)
+
+
+async def analyze_game_wiki(game_name: str, wiki_url: str | None = None) -> dict:
+    async with httpx.AsyncClient(
+        timeout=15,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; market-research-bot/1.0)"},
+        follow_redirects=True,
+    ) as client:
+        base = wiki_url.rstrip("/") if wiki_url else None
+        if not base:
+            base = await _discover_fandom_wiki(client, game_name)
+        if not base:
+            return {
+                "error": f"No Fandom wiki found for '{game_name}'.",
+                "hint": "Provide wiki_url directly (e.g. 'https://bloxfruits.fandom.com').",
+            }
+
+        all_economy_records: list[dict] = []
+        description = ""
+        pages_fetched = 0
+        seen_urls: set[str] = set()
+
+        for sub in WIKI_SUB_PAGES:
+            url = base + sub
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            try:
+                resp = await client.get(url, timeout=8)
+                if resp.status_code != 200:
+                    continue
+                html = resp.text
+                pages_fetched += 1
+                if not description:
+                    description = _extract_lead_text(html)
+                for table in _parse_tables(html):
+                    records = _table_to_records(table)
+                    if _is_economy_table(records):
+                        all_economy_records.extend(records[:25])
+            except Exception:
+                continue
+
+        if pages_fetched == 0:
+            return {"error": f"Wiki at '{base}' returned errors on all pages.", "wiki_url": base}
+
+        seen_keys: set[str] = set()
+        unique_records: list[dict] = []
+        for r in all_economy_records:
+            key = str(list(r.values())[:2])
+            if key not in seen_keys:
+                seen_keys.add(key)
+                unique_records.append(r)
+
+        currencies = _detect_currencies(unique_records)
+        algorithm_lens = _build_algorithm_lens(currencies, len(unique_records))
+
+        return {
+            "game": game_name,
+            "wiki_source": base,
+            "description": description or "No description extracted.",
+            "currencies_detected": currencies,
+            "economy_items_found": len(unique_records),
+            "sample_items": unique_records[:15],
+            "algorithm_lens": algorithm_lens,
+            "pages_fetched": pages_fetched,
+            "data_note": (
+                "Sourced from public wiki. Item costs reflect wiki accuracy, not live game state. "
+                "Missing data means the wiki may be incomplete, not the game."
+            ),
+        }
+```
+
 ## Key Design Decisions
 
 **STDIO transport, not HTTP.** Claude Code connects to MCP servers via STDIO by default. No port, no deployment, no network config needed for the demo. The server is invoked as a subprocess.
 
-**In-memory cache.** The full pipeline (Rolimons → universeIds → game details) takes 10-30 seconds on cold start due to batched HTTP calls. All four tools read from the same cached snapshot. Cache refreshes every 10 minutes. This makes tool calls feel instant after the first warm-up.
+**In-memory cache (market data only).** The full pipeline (Rolimons → universeIds → game details) takes 10-30 seconds on cold start. All four market tools share the same cached snapshot, which refreshes every 10 minutes. `analyze_game_design` runs on-demand without caching — it's per-game and latency is acceptable (~2-5s).
 
 **RoTunnel proxy.** Roblox's own APIs have CORS restrictions and inconsistent rate limiting from external IPs. RoTunnel rotates IPs and proxies the exact same endpoints, no signup required. This eliminates the most fragile part of the data pipeline.
 
@@ -406,11 +708,14 @@ def compute_top_performers(games: list[dict], metric: str) -> dict:
 
 **Per-user signal framing.** All outputs are framed in per-user terms, not totals. This reflects how the algorithm actually works (per Roblox's official documentation) and prevents the agent from optimizing for raw player count instead of engagement quality.
 
+**Wiki scraper uses stdlib only.** `html.parser` is used for table extraction — no BeautifulSoup, no lxml. Requirements stay at two packages. The parser only processes outermost tables (nested table depth tracking) to avoid nav/infobox pollution.
+
 ## Rate Limit Handling
 
 - Rolimons: No documented rate limit. One call per cache refresh (every 10 min). Low risk.
 - RoTunnel (universeId): 50 concurrent requests max via semaphore. IP rotation handles rate limits.
 - RoTunnel (game details): Batched in 100s. 3 batches for 300 games. Low risk.
+- Fandom wikis: ~10 sequential page fetches per `analyze_game_design` call with 8s timeout each. Low risk — Fandom is public and uncapped.
 
 If any step fails, games without that data are silently excluded. The server degrades gracefully rather than erroring.
 

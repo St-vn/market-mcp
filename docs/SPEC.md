@@ -128,6 +128,38 @@ Top games ranked by a specific signal proxy.
 }
 ```
 
+#### `analyze_game_design(game_name: str, wiki_url: str = "")`
+Scrapes a competitor game's public Fandom wiki to extract economy design, item costs, currency systems, and progression patterns. Interprets findings through the RFY discovery algorithm lens.
+
+**Input:**
+- `game_name` — name of any Roblox game (e.g. `"Blox Fruits"`, `"Adopt Me"`, `"Pet Simulator X"`)
+- `wiki_url` — optional direct wiki base URL (e.g. `"https://bloxfruits.fandom.com"`). Auto-discovered if omitted.
+
+**Output:**
+```json
+{
+  "game": "Blox Fruits",
+  "wiki_source": "https://bloxfruits.fandom.com",
+  "description": "Blox Fruits is an action RPG where players fight enemies, level up, and collect Devil Fruits...",
+  "currencies_detected": [
+    "Robux (premium Roblox currency)",
+    "Beli (in-game currency)"
+  ],
+  "economy_items_found": 47,
+  "sample_items": [
+    { "fruit": "Chop", "type": "Common", "cost": "3,000 Beli" },
+    { "fruit": "Bomb", "type": "Common", "cost": "5,000 Beli" }
+  ],
+  "algorithm_lens": "Dual-currency economy (Robux + Beli grind): standard Roblox retention engine. In-game currency requires daily play sessions (boosts 7-day play-days proxy). Rich item catalog (47+ items): depth of collectibles correlates with repeat-session motivation and favorites rate.",
+  "pages_fetched": 4,
+  "data_note": "Sourced from public wiki. Item costs reflect wiki accuracy, not live game state."
+}
+```
+
+**Data source:** Fandom wikis (most Roblox games with active communities are documented at `<gamename>.fandom.com`). Pages fetched include main page, shop, items, gamepasses, and currency sub-pages.
+
+**When auto-discovery fails:** Provide `wiki_url` directly. Common reasons for failure: wiki slug doesn't follow standard patterns, game has no public wiki, or wiki is on a non-Fandom platform.
+
 ## Data Pipeline
 
 ```
@@ -157,6 +189,28 @@ Step 5: Cache full dataset in memory
   → Refresh every 10 minutes
   → All tool calls read from cache (no per-call latency)
 ```
+
+## Wiki Intelligence Pipeline
+
+```
+analyze_game_design(game_name, wiki_url?)
+  → _discover_fandom_wiki()  (if no wiki_url provided)
+      → probe <gamename>.fandom.com and <game-name>.fandom.com
+      → return first URL where slug appears in final response URL
+  → fetch up to 10 sub-pages per wiki
+      → /wiki/, /wiki/Gamepasses, /wiki/Shop, /wiki/Items,
+        /wiki/Currency, /wiki/Currencies, /wiki/Store, etc.
+  → _parse_tables()           (stdlib html.parser, outermost tables only)
+  → _table_to_records()       (first row = headers, rest = data)
+  → _is_economy_table()       (keyword filter: cost/price/robux/coin/gem/…)
+  → _detect_currencies()      (match known currency names in table content)
+  → _build_algorithm_lens()   (interpret economy structure as algorithm signals)
+  → return structured dict
+```
+
+**No new dependencies.** Uses `html.parser` from stdlib. `httpx` is already required.
+
+**Graceful degradation:** Individual page failures are silently dropped. If all pages fail, returns an error dict with a hint for the user.
 
 ## Out of Scope (MVP)
 

@@ -10,10 +10,11 @@ The agent gets market intelligence, not raw numbers.
 
 ```
 roblox-market-mcp/
-├── server.py          # FastMCP server entry point, all four tool definitions
+├── server.py          # FastMCP server entry point, all five tool definitions
 ├── data/
 │   ├── fetcher.py     # HTTP pipeline: Rolimons → universeIds → game details
-│   └── signals.py     # Signal computation, genre aggregation, gap analysis
+│   ├── signals.py     # Signal computation, genre aggregation, gap analysis
+│   └── wiki.py        # Fandom wiki scraper: table extraction, economy analysis
 ├── requirements.txt
 ├── README.md
 ├── SPEC.md
@@ -30,7 +31,8 @@ Implement the files exactly as specified in `ARCHITECTURE.md`. The code there is
 1. `requirements.txt` — two dependencies only: `fastmcp>=3.2.0` and `httpx>=0.27.0`
 2. `data/signals.py` — pure Python, no I/O, easiest to test in isolation
 3. `data/fetcher.py` — async HTTP pipeline, three data sources
-4. `server.py` — FastMCP wiring and cache layer
+4. `data/wiki.py` — Fandom wiki scraper, stdlib only, see ARCHITECTURE.md
+5. `server.py` — FastMCP wiring, cache layer, all five tools
 
 ## Data Pipeline (critical to understand)
 
@@ -89,6 +91,16 @@ These are approximations, not exact replicas. The algorithm signals require Crea
 - Calls `compute_top_performers(snapshot, metric)`
 - Valid metrics: "engagement", "sentiment", "breakout", "favorites"
 - Returns top 20 games for that metric with supporting context
+
+### `analyze_game_design(game_name, wiki_url="")`
+- No cache — runs on-demand per game (~2-5 seconds)
+- Calls `analyze_game_wiki(game_name, wiki_url or None)` from `data/wiki.py`
+- Auto-discovers the game's Fandom wiki if `wiki_url` is not provided
+- Fetches up to 10 sub-pages: main, gamepasses, shop, items, currency, store, etc.
+- Extracts economy tables using stdlib `html.parser` (outermost tables only)
+- Returns: `wiki_source`, `description`, `currencies_detected`, `economy_items_found`, `sample_items`, `algorithm_lens`, `pages_fetched`
+- `algorithm_lens` interprets the economy structure as RFY algorithm signal proxies
+- Returns error dict (not exception) if wiki not found — error includes hint for user
 
 ## Cache Behavior
 
