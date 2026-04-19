@@ -7,11 +7,14 @@ ROBLOX_GAMES = "https://games.roblox.com/v1/games"
 
 TOP_N = 300          # Games to pull from Rolimons by player count
 BATCH_SIZE = 50      # Roblox game detail API limit per request (max 50 universeIds)
-CONCURRENT = 20      # Max concurrent universe ID lookups
+CONCURRENT = 1       # Serial universe ID lookups — Roblox rate-limits at 60/60s
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.rolimons.com/",
+    "Origin": "https://www.rolimons.com",
 }
 
 async def get_market_snapshot() -> list[dict]:
@@ -36,27 +39,26 @@ async def fetch_rolimons(client: httpx.AsyncClient) -> list[dict]:
     return games[:TOP_N]
 
 async def enrich_universe_ids(client: httpx.AsyncClient, games: list[dict]) -> list[dict]:
-    # Roblox rate-limits universe lookups to ~60 req per 5-second window.
-    # Process in batches of 50 with a 6-second pause between batches to stay safe.
-    RATE_BATCH = 50
-    RATE_DELAY = 6.0  # seconds between batches; enough to clear the 5s rate-limit window
+    sem = asyncio.Semaphore(CONCURRENT)
 
     async def fetch_one(game):
-        try:
-            url = ROBLOX_UNIVERSE.format(place_id=game["place_id"])
-            resp = await client.get(url)
-            if resp.status_code == 200:
-                game["universe_id"] = str(resp.json()["universeId"])
-        except Exception:
-            pass  # Skip games where conversion fails
+        async with sem:
+            try:
+                url = ROBLOX_UNIVERSE.format(place_id=game["place_id"])
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    game["universe_id"] = str(resp.json()["universeId"])
+                elif resp.status_code == 429:
+                    await asyncio.sleep(2)
+                    resp2 = await client.get(url)
+                    if resp2.status_code == 200:
+                        game["universe_id"] = str(resp2.json()["universeId"])
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
         return game
 
-    batches = [games[i:i + RATE_BATCH] for i in range(0, len(games), RATE_BATCH)]
-    for i, batch in enumerate(batches):
-        await asyncio.gather(*[fetch_one(g) for g in batch])
-        if i < len(batches) - 1:
-            await asyncio.sleep(RATE_DELAY)
-
+    await asyncio.gather(*[fetch_one(g) for g in games])
     return games
 
 async def enrich_game_details(client: httpx.AsyncClient, games: list[dict]) -> list[dict]:
