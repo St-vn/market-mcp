@@ -27,6 +27,7 @@ def compute_signals(game: dict) -> dict:
     engagement_ratio = active / visits
     favorites_rate = favorites / visits
     breakout_score = engagement_ratio * (1 / math.log10(visits + 10))
+    has_strong_monetization_signal = favorites > 10_000 and visits > 1_000_000
 
     return {
         **game,
@@ -34,6 +35,7 @@ def compute_signals(game: dict) -> dict:
         "engagement_ratio": round(engagement_ratio, 6),
         "favorites_rate": round(favorites_rate, 6),
         "breakout_score": round(breakout_score, 8),
+        "has_strong_monetization_signal": has_strong_monetization_signal,
     }
 
 def benchmark(value: float, metric: str) -> str:
@@ -75,6 +77,9 @@ def genre_summary(genre: str, games: list[dict]) -> dict:
     else:
         discovery_signal = "Weak — signals below benchmark. Existing games not satisfying the algorithm."
 
+    monetization_count = sum(1 for g in games if g.get("has_strong_monetization_signal", False))
+    monetization_presence = f"{monetization_count}/{len(games)} games show strong monetization signals"
+
     return {
         "genre": genre,
         "game_count": len(games),
@@ -86,6 +91,7 @@ def genre_summary(genre: str, games: list[dict]) -> dict:
         "discovery_signal": discovery_signal,
         "top_game": top_game.get("name", "Unknown"),
         "top_game_active_players": top_game.get("active_players", 0),
+        "monetization_presence": monetization_presence,
     }
 
 def compute_genre_stats(games: list[dict], filter_genre: str = None) -> dict:
